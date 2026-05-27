@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
 """
-RealSense D415 Dataset Recorder — GUI Mini-App (v4 FIXED)
-- Мониторинг CPU, RAM, скорости записи на диск, свободного места
-- Исправлена ошибка с psutil.disk_io_counters (namedtuple immutability)
-- тест лдлдл7
 
 """
 import tkinter as tk
