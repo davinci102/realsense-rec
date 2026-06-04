@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
-RealSense D415 Dataset Recorder — GUI Mini-App (v4 FIXED)
-- Мониторинг CPU, RAM, скорости записи на диск, свободного места
-- Исправлена ошибка с psutil.disk_io_counters (namedtuple immutability)
+RealSense D415 Dataset Recorder — Final ML-Ready (v6.1)
+- Запись в .db3 (ROS2 совместимый формат)
+- Формат цвета: RGB8 (стандарт для ML)
+- Глубина: Z16 (сырая, в миллиметрах)
+- FPS: 6 | 15 | 30 (10 удалён из-за ошибок совместимости)
+- Авто-сегментация по 60 секунд
+- Мониторинг системы (CPU, RAM, Диск, Скорость записи)
+- Фиксация экспозиции/баланса белого для стабильности цветов
+- Сохранение калибровки (JSON)
 """
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -47,11 +53,9 @@ class RealSenseRecorderApp:
         self._sys_stats_ts = 0
         self._last_io_time = time.time()
         
-        # 🔑 Храним только число байтов, а не весь namedtuple
+        # Инициализация счетчиков psutil
         io_counters = psutil.disk_io_counters()
         self._last_io_bytes = io_counters.write_bytes if io_counters else 0
-        
-        # Первый вызов cpu_percent всегда 0.0, "разогреваем" его
         psutil.cpu_percent(interval=None)
 
         self._build_ui()
@@ -71,21 +75,23 @@ class RealSenseRecorderApp:
         settings_frame = ttk.LabelFrame(self.root, text="⚙️ Параметры записи")
         settings_frame.pack(fill="x", **pad)
 
+        # Разрешение
         ttk.Label(settings_frame, text="Разрешение:").grid(row=0, column=0, sticky="w", **pad)
         self.cmb_res = ttk.Combobox(settings_frame, values=["640x480", "848x480", "1280x720"], 
                                     state="readonly", width=10)
         self.cmb_res.current(0)
         self.cmb_res.grid(row=0, column=1, sticky="w", padx=5)
 
+        # FPS (Удалён 10, оставлены 6, 15, 30)
         ttk.Label(settings_frame, text="FPS:").grid(row=0, column=2, sticky="w", **pad)
         self.cmb_fps = ttk.Combobox(settings_frame, values=["6", "15", "30"], 
                                     state="readonly", width=5)
-        self.cmb_fps.current(2)
+        self.cmb_fps.current(1) # По умолчанию 15 FPS
         self.cmb_fps.grid(row=0, column=3, sticky="w", padx=5)
 
-        self.var_color = tk.BooleanVar(value=True)
-        chk_color = ttk.Checkbutton(settings_frame, text="🎨 Цветной поток", variable=self.var_color)
-        chk_color.grid(row=0, column=4, sticky="w", padx=10)
+        # Цветной поток (всегда включен для датасета)
+        ttk.Label(settings_frame, text="Поток:").grid(row=0, column=4, sticky="w", **pad)
+        ttk.Label(settings_frame, text="RGB8 + Z16", foreground="green").grid(row=0, column=5, sticky="w")
 
         # === 3. Управление ===
         ctrl_frame = ttk.Frame(self.root)
@@ -189,18 +195,18 @@ class RealSenseRecorderApp:
             free_gb = 0.0
         self.lbl_disk_free.config(text=f"{free_gb:.2f} ГБ свободно",
                                   foreground="red" if free_gb < 0.5 else "orange" if free_gb < 2.0 else "black")
+        
         if self.recording and free_gb < 0.5:
             self.stop_event.set()
             self._log("⚠️ КРИТИЧЕСКИ МАЛО МЕСТА! Авто-остановка...")
 
-        # 🔑 Скорость записи (используем только числовое значение байтов)
+        # Скорость записи
         current_io = psutil.disk_io_counters()
         if current_io is not None:
             dt = time.time() - self._last_io_time
             if dt > 0.8:
                 write_delta = current_io.write_bytes - self._last_io_bytes
                 write_speed = (write_delta / dt) / (1024**2)  # MB/s
-                # Защита от отрицательных значений при сбросе счётчиков ОС
                 write_speed = max(0.0, write_speed)
                 
                 self.lbl_disk_write.config(text=f"{write_speed:.1f} MB/s",
@@ -225,6 +231,7 @@ class RealSenseRecorderApp:
             }
             self.lbl_cam.config(text=f"✅ {self.cam_info['name']} | SN: {self.cam_info['sn']}")
             
+            # Временный пайплайн для считывания метаданных калибровки
             tmp_pipe = rs.pipeline()
             tmp_cfg = rs.config()
             tmp_cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
@@ -235,15 +242,23 @@ class RealSenseRecorderApp:
             c_p = tmp_profile.get_stream(rs.stream.color).as_video_stream_profile()
             
             self.calib_data = {
-                "device": self.cam_info["name"], "serial": self.cam_info["sn"],
-                "depth_intrinsics": {"fx": d_p.intrinsics.fx, "fy": d_p.intrinsics.fy,
-                                     "ppx": d_p.intrinsics.ppx, "ppy": d_p.intrinsics.ppy,
-                                     "model": str(d_p.intrinsics.model), "coeffs": list(d_p.intrinsics.coeffs)},
-                "color_intrinsics": {"fx": c_p.intrinsics.fx, "fy": c_p.intrinsics.fy,
-                                     "ppx": c_p.intrinsics.ppx, "ppy": c_p.intrinsics.ppy,
-                                     "model": str(c_p.intrinsics.model), "coeffs": list(c_p.intrinsics.coeffs)},
-                "extrinsics": {"rot": list(d_p.get_extrinsics_to(c_p).rotation),
-                               "trans": list(d_p.get_extrinsics_to(c_p).translation)}
+                "device": self.cam_info["name"], 
+                "serial": self.cam_info["sn"], 
+                "firmware": self.cam_info["fw"],
+                "depth_intrinsics": {
+                    "fx": d_p.intrinsics.fx, "fy": d_p.intrinsics.fy,
+                    "ppx": d_p.intrinsics.ppx, "ppy": d_p.intrinsics.ppy,
+                    "model": str(d_p.intrinsics.model), "coeffs": list(d_p.intrinsics.coeffs)
+                },
+                "color_intrinsics": {
+                    "fx": c_p.intrinsics.fx, "fy": c_p.intrinsics.fy,
+                    "ppx": c_p.intrinsics.ppx, "ppy": c_p.intrinsics.ppy,
+                    "model": str(c_p.intrinsics.model), "coeffs": list(c_p.intrinsics.coeffs)
+                },
+                "extrinsics_depth_to_color": {
+                    "rotation": list(d_p.get_extrinsics_to(c_p).rotation),
+                    "translation": list(d_p.get_extrinsics_to(c_p).translation)
+                }
             }
             tmp_pipe.stop()
             self._log("✅ Калибровка считана.")
@@ -263,19 +278,21 @@ class RealSenseRecorderApp:
         state = "disabled" if lock else "readonly"
         self.cmb_res.config(state=state)
         self.cmb_fps.config(state=state)
-        for child in self.root.winfo_children():
-            if isinstance(child, ttk.Checkbutton) and "Цветной поток" in child.cget("text"):
-                child.config(state="disabled" if lock else "normal")
 
     def _get_current_settings(self):
         w, h = map(int, self.cmb_res.get().split('x'))
-        return {"width": w, "height": h, "fps": int(self.cmb_fps.get()), "color": self.var_color.get()}
+        return {
+            "width": w, 
+            "height": h, 
+            "fps": int(self.cmb_fps.get())
+        }
 
     def _start_recording(self):
         try:
             free_gb = shutil.disk_usage(self.base_dir).free / (1024**3)
         except:
             free_gb = 0.0
+            
         if free_gb < 0.5:
             self._log("⚠️ Недостаточно места (<500 МБ). Запись невозможна.")
             return
@@ -285,6 +302,7 @@ class RealSenseRecorderApp:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.segment_idx = 0
         
+        # Сохраняем калибровку в папку сессии
         if self.calib_data:
             with open(self.output_dir / "calibration.json", "w", encoding="utf-8") as f:
                 json.dump(self.calib_data, f, indent=2, ensure_ascii=False)
@@ -318,16 +336,35 @@ class RealSenseRecorderApp:
             try:
                 cfg = rs.config()
                 cfg.enable_record_to_file(str(filepath))
+                
+                # Настройка потоков
                 cfg.enable_stream(rs.stream.depth, settings["width"], settings["height"], 
                                   rs.format.z16, settings["fps"])
-                if settings["color"]:
-                    cfg.enable_stream(rs.stream.color, settings["width"], settings["height"], 
-                                      rs.format.rgb8, settings["fps"])
+                cfg.enable_stream(rs.stream.color, settings["width"], settings["height"], 
+                                  rs.format.rgb8, settings["fps"])
                 
                 self.pipe.start(cfg)
+                
+                # === Фиксация настроек экспозиции (Критично для ML датасетов) ===
+                try:
+                    dev = self.pipe.get_active_profile().get_device()
+                    for sensor in dev.sensors:
+                        if sensor.get_streams()[0].stream_type() == rs.stream.color:
+                            # Отключаем авто-настройки
+                            sensor.set_option(rs.option.enable_auto_exposure, False)
+                            sensor.set_option(rs.option.enable_auto_white_balance, False)
+                            # Устанавливаем ручные значения (подбираются под условия освещения)
+                            sensor.set_option(rs.option.exposure, 200)      # Выдержка
+                            sensor.set_option(rs.option.gain, 32)           # Усиление
+                            sensor.set_option(rs.option.white_balance, 4600) # Баланс белого (~4600K)
+                            break
+                except Exception as e:
+                    self._log(f"⚠️ Не удалось заблокировать авто-настройки: {e}")
+                
                 self.segment_start = time.time()
                 self.msg_queue.put(f"💾 {segment_name} | {settings['width']}x{settings['height']}@{settings['fps']}FPS")
                 
+                # Цикл записи сегмента (60 секунд)
                 while not self.stop_event.is_set() and (time.time() - self.segment_start) < 60:
                     frames = self.pipe.wait_for_frames(timeout_ms=2000)
                     time.sleep(0.02)
