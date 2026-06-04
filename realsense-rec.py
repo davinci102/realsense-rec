@@ -228,7 +228,7 @@ class RealSenseRecorderApp:
             tmp_pipe = rs.pipeline()
             tmp_cfg = rs.config()
             tmp_cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-            tmp_cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+            tmp_cfg.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
             tmp_profile = tmp_pipe.start(tmp_cfg)
             
             d_p = tmp_profile.get_stream(rs.stream.depth).as_video_stream_profile()
@@ -322,7 +322,7 @@ class RealSenseRecorderApp:
                                   rs.format.z16, settings["fps"])
                 if settings["color"]:
                     cfg.enable_stream(rs.stream.color, settings["width"], settings["height"], 
-                                      rs.format.bgr8, settings["fps"])
+                                      rs.format.rgb8, settings["fps"])
                 
                 self.pipe.start(cfg)
                 self.segment_start = time.time()
